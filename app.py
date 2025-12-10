@@ -699,8 +699,15 @@ def admin_page():
         staff_list = get_all_staff_names()
         selected_staff_edit = st.selectbox("Select Staff to Edit", ["Select..."] + staff_list, key="admin_select_staff_edit")
         
+        # FIX: Only create the form if a staff member is actually selected to avoid the "Missing Submit Button" warning.
         if selected_staff_edit != "Select...":
             config = get_staff_config(selected_staff_edit)
+            
+            # Ensure numeric fields are robustly cast to float with a fallback of 0.0
+            # FIX: StreamlitMixedNumericTypesError
+            direct_rate_val = float(config.get('base_rate', 0.0))
+            indirect_rate_val = float(config.get('indirect_rate', 0.0))
+            travel_fee_val = float(config.get('travel_fee', 0.0))
             
             # Show Login ID (Read Only)
             current_username = get_username_by_staff_name(selected_staff_edit)
@@ -716,11 +723,11 @@ def admin_page():
                 new_role = c1.text_input("Position", value=config['position'])
                 new_pay_type = c2.selectbox("Pay Type", ["Hourly", "Percentage"], index=0 if config['pay_type']=='Hourly' else 1)
                 c3, c4 = st.columns(2)
-                # FIX: Added step=0.01 to allow decimal rates/percentages
-                new_direct_rate = c3.number_input("Direct Rate ($/hr or %)", value=config['base_rate'], step=0.01)
-                indirect_val = config['indirect_rate'] if 'indirect_rate' in config else 0.0
-                new_indirect_rate = c4.number_input("Indirect Rate ($/hr)", value=indirect_val, step=0.01) # FIX: Added step=0.01
-                new_travel = st.number_input("Travel Fee ($)", value=config['travel_fee'], step=0.01) # FIX: Added step=0.01
+                
+                # FIX: Using the robustly cast values
+                new_direct_rate = c3.number_input("Direct Rate ($/hr or %)", value=direct_rate_val, step=0.01)
+                new_indirect_rate = c4.number_input("Indirect Rate ($/hr)", value=indirect_rate_val, step=0.01)
+                new_travel = st.number_input("Travel Fee ($)", value=travel_fee_val, step=0.01)
                 
                 # Password Reset (Admin only)
                 st.markdown("##### Change Password (Optional)")
