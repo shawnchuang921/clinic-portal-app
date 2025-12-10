@@ -34,6 +34,7 @@ def init_connection():
     try:
         return create_client(SUPABASE_URL, SUPABASE_KEY)
     except Exception as e:
+        # NOTE: This error now should only show if the URL itself is invalid (DNS error)
         st.error(f"Failed to connect to Database: {e}")
         return None
 
@@ -143,9 +144,11 @@ def add_new_staff(username, password, staff_name, position, pay_type, direct_rat
 def delete_staff(staff_name):
     """Deletes a staff member from all tables."""
     try:
+        # Delete related records first
+        supabase.table('staff_logs').delete().eq('staff_name', staff_name).execute()
+        # Delete config and user
         supabase.table('users').delete().eq('staff_name', staff_name).execute()
         supabase.table('staff_config').delete().eq('staff_name', staff_name).execute()
-        supabase.table('staff_logs').delete().eq('staff_name', staff_name).execute()
     except Exception as e:
         st.error(f"Error deleting staff: {e}")
 
@@ -180,11 +183,13 @@ def calculate_total_pay(config, direct_hrs, indirect_hrs, charged_amount, is_hom
     if config['pay_type'] == 'Hourly':
         total_pay = (direct_hrs * direct_rate) + (indirect_hrs * indirect_rate) + travel_fee_val
     elif config['pay_type'] == 'Percentage':
+        # Direct rate is a percentage (e.g., 56.25)
         total_pay = (charged_amount * (direct_rate / 100)) + travel_fee_val
     
     return total_pay, travel_fee_val
 
 # --- 3. RECONCILIATION LOGIC (Refined for DataFrames) ---
+# (Rest of reconciliation logic remains unchanged as it was not the source of current bugs)
 
 def run_reconciliation_logic(df_staff, df_sales):
     # Ensure DataFrame columns are lowercase for matching logic
@@ -462,9 +467,9 @@ def staff_entry_page():
 
     st.info(f"**Position:** {config['position']} | **Pay Type:** {config['pay_type']}")
     if config['pay_type'] == 'Hourly':
-        st.caption(f"Rates: ${direct_rate}/hr (Direct) | ${indirect_rate}/hr (Indirect) | Travel Fee: ${travel_fee}")
+        st.caption(f"Rates: ${direct_rate:g}/hr (Direct) | ${indirect_rate:g}/hr (Indirect) | Travel Fee: ${travel_fee:g}")
     elif config['pay_type'] == 'Percentage':
-        st.caption(f"Rates: {direct_rate}% of Charged Amt | Travel Fee: ${travel_fee}")
+        st.caption(f"Rates: {direct_rate:g}% of Charged Amt | Travel Fee: ${travel_fee:g}")
 
     # New Entry Form
     st.markdown("### 📝 Submit New Entry")
@@ -478,7 +483,7 @@ def staff_entry_page():
         
         charged_amount = 0.0
         if config['pay_type'] == 'Percentage':
-            charged_amount = st.number_input("Charged Amount ($)", min_value=0.0, step=10.0, key="new_charged_amt")
+            charged_amount = st.number_input("Charged Amount ($)", min_value=0.0, step=0.01, key="new_charged_amt") # Changed step to 0.01 for decimals
         
         is_home_session = st.checkbox("Home Session / Outside Clinic?")
         notes = st.text_area("Notes (Optional)")
@@ -524,8 +529,15 @@ def staff_entry_page():
         
         if log_id_to_edit > 0:
             current_row = get_log_entry_by_id(log_id_to_edit)
+            
+            # Use session state to manage the delete button outside the form
+            if 'delete_confirm_id' not in st.session_state:
+                st.session_state['delete_confirm_id'] = None
+            
             if current_row and current_row['staff_name'] == st.session_state['staff_name']:
                 st.info(f"Editing Log ID: {log_id_to_edit} - Client: {current_row['client_name']}")
+                
+                # --- Edit Form ---
                 with st.form("edit_log_form"):
                     col_e1, col_e2 = st.columns(2)
                     e_date = col_e1.date_input("Date", pd.to_datetime(current_row['date']), key="e_date")
@@ -533,9 +545,11 @@ def staff_entry_page():
                     col_e3, col_e4 = st.columns(2)
                     e_direct = col_e3.number_input("Direct Hrs", value=float(current_row['direct_hrs']), min_value=0.0, step=0.5, key="e_direct")
                     e_indirect = col_e4.number_input("Indirect Hrs", value=float(current_row['indirect_hrs']), min_value=0.0, step=0.5, key="e_indirect")
+                    
                     e_charged = float(current_row['charged_amount'])
                     if config['pay_type'] == 'Percentage':
-                        e_charged = st.number_input("Charged Amt", value=float(current_row['charged_amount']), min_value=0.0, step=10.0, key="e_charged")
+                        e_charged = st.number_input("Charged Amt", value=float(current_row['charged_amount']), min_value=0.0, step=0.01, key="e_charged") # Changed step to 0.01
+                    
                     e_is_home = (current_row['outside_clinic'] == 'Yes')
                     e_outside = st.checkbox("Home Session?", value=e_is_home, key="e_outside")
                     e_notes = st.text_area("Notes", current_row['notes'], key="e_notes")
@@ -547,16 +561,32 @@ def staff_entry_page():
                             'charged_amount': e_charged, 'outside_clinic': "Yes" if e_outside else "No", 'travel_fee_used': recalculated_travel, 'total_pay': recalculated_pay, 'notes': e_notes
                         }
                         update_log_entry(log_id_to_edit, updated_data)
+                        st.session_state['delete_confirm_id'] = None # Clear confirmation state
                         st.toast(f"Log updated! New Pay: ${recalculated_pay:.2f}", icon="✅")
                         time.sleep(1)
                         st.rerun()
-                    
-                    # Delete Button OUTSIDE form
-                    if st.button("Delete Log Entry", key=f"del_{log_id_to_edit}"):
+
+                # --- Delete Button OUTSIDE FORM (FIXED StreamlitAPIException) ---
+                st.markdown("---")
+                # Step 1: Request confirmation
+                if st.button("Delete Log Entry", key=f"del_request_{log_id_to_edit}"):
+                    st.session_state['delete_confirm_id'] = log_id_to_edit
+                    st.rerun() # Rerun to show confirmation buttons
+                
+                # Step 2: Show confirmation buttons
+                if st.session_state['delete_confirm_id'] == log_id_to_edit:
+                    st.warning(f"Are you sure you want to permanently delete Log ID {log_id_to_edit}?")
+                    col_del1, col_del2 = st.columns(2)
+                    if col_del1.button("CONFIRM DELETE", key=f"del_confirm_{log_id_to_edit}"):
                         delete_log_entry(log_id_to_edit)
+                        st.session_state['delete_confirm_id'] = None
                         st.toast("Log deleted.", icon="🗑️")
                         time.sleep(1)
                         st.rerun()
+                    if col_del2.button("Cancel Delete", key=f"del_cancel_{log_id_to_edit}"):
+                        st.session_state['delete_confirm_id'] = None
+                        st.rerun()
+
             elif current_row:
                  st.error("Unauthorized.")
             else:
@@ -648,9 +678,10 @@ def admin_page():
             new_role = c_r1.text_input("Position", value="OT", key="new_position")
             new_pay_type = c_r2.selectbox("Pay Type", ["Hourly", "Percentage"], key="new_pay_type")
             c_r3, c_r4 = st.columns(2)
-            new_direct_rate = c_r3.number_input("Direct Rate ($/hr or %)", value=80.0, key="new_direct_rate")
-            new_indirect_rate = c_r4.number_input("Indirect Rate ($/hr)", value=0.0, key="new_indirect_rate")
-            new_travel = st.number_input("Travel Fee ($)", value=20.0, key="new_travel")
+            # FIX: Added step=0.01 to allow decimal rates/percentages
+            new_direct_rate = c_r3.number_input("Direct Rate ($/hr or %)", value=80.0, step=0.01, key="new_direct_rate")
+            new_indirect_rate = c_r4.number_input("Indirect Rate ($/hr)", value=0.0, step=0.01, key="new_indirect_rate")
+            new_travel = st.number_input("Travel Fee ($)", value=20.0, step=0.01, key="new_travel") # FIX: Added step=0.01
             
             if st.form_submit_button("Create New Staff"):
                 if not new_staff_name or not new_login_id or not new_password:
@@ -670,19 +701,26 @@ def admin_page():
         
         if selected_staff_edit != "Select...":
             config = get_staff_config(selected_staff_edit)
+            
             # Show Login ID (Read Only)
             current_username = get_username_by_staff_name(selected_staff_edit)
             st.text_input("Login ID (Read-Only)", value=current_username, disabled=True)
             
+            # Use session state for delete confirmation (improves robustness)
+            if 'admin_delete_confirm' not in st.session_state:
+                st.session_state['admin_delete_confirm'] = None
+
+            # --- Edit Form ---
             with st.form("edit_staff_form"):
                 c1, c2 = st.columns(2)
                 new_role = c1.text_input("Position", value=config['position'])
                 new_pay_type = c2.selectbox("Pay Type", ["Hourly", "Percentage"], index=0 if config['pay_type']=='Hourly' else 1)
                 c3, c4 = st.columns(2)
-                new_direct_rate = c3.number_input("Direct Rate ($/hr or %)", value=config['base_rate'])
+                # FIX: Added step=0.01 to allow decimal rates/percentages
+                new_direct_rate = c3.number_input("Direct Rate ($/hr or %)", value=config['base_rate'], step=0.01)
                 indirect_val = config['indirect_rate'] if 'indirect_rate' in config else 0.0
-                new_indirect_rate = c4.number_input("Indirect Rate ($/hr)", value=indirect_val)
-                new_travel = st.number_input("Travel Fee ($)", value=config['travel_fee'])
+                new_indirect_rate = c4.number_input("Indirect Rate ($/hr)", value=indirect_val, step=0.01) # FIX: Added step=0.01
+                new_travel = st.number_input("Travel Fee ($)", value=config['travel_fee'], step=0.01) # FIX: Added step=0.01
                 
                 # Password Reset (Admin only)
                 st.markdown("##### Change Password (Optional)")
@@ -690,18 +728,32 @@ def admin_page():
                 
                 if st.form_submit_button("Update Staff Info"):
                     update_staff_info(selected_staff_edit, new_role, new_pay_type, new_direct_rate, new_indirect_rate, new_travel, new_password)
+                    st.session_state['admin_delete_confirm'] = None # Clear confirmation state
                     st.toast("Staff info updated!", icon="✅")
                     time.sleep(1)
                     st.rerun()
 
-            if st.button(f"Delete Staff: {selected_staff_edit}"):
-                # Add confirmation step
-                st.warning("Are you sure you want to delete this staff member and all associated data?")
-                if st.button("Confirm Deletion", key="confirm_delete_staff"):
+            # --- Delete Buttons OUTSIDE FORM (FIXED User Delete Issue) ---
+            st.markdown("---")
+            # Step 1: Request confirmation
+            if st.button(f"Delete Staff: {selected_staff_edit}", key=f"del_request_admin_{selected_staff_edit}"):
+                st.session_state['admin_delete_confirm'] = selected_staff_edit
+                st.rerun()
+            
+            # Step 2: Show confirmation buttons
+            if st.session_state['admin_delete_confirm'] == selected_staff_edit:
+                st.warning(f"Are you sure you want to permanently delete {selected_staff_edit} and ALL associated data?")
+                col_del1, col_del2 = st.columns(2)
+                if col_del1.button("CONFIRM PERMANENT DELETION", key=f"del_confirm_admin_{selected_staff_edit}"):
                     delete_staff(selected_staff_edit)
-                    st.toast(f"Staff {selected_staff_edit} deleted.", icon="🗑️")
+                    st.session_state['admin_delete_confirm'] = None
+                    st.toast(f"Staff {selected_staff_edit} and all data deleted.", icon="🗑️")
                     time.sleep(1)
                     st.rerun()
+                if col_del2.button("Cancel Deletion", key=f"del_cancel_admin_{selected_staff_edit}"):
+                    st.session_state['admin_delete_confirm'] = None
+                    st.rerun()
+
 
     with tab3:
         st.subheader("All Staff Logs")
